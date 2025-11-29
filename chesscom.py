@@ -118,6 +118,67 @@ def process_all_modes(username, start_date_str):
     return pd.DataFrame(history_data)
 
 # --- CHART GENERATION ---
+def create_overall_performance_chart(df):
+    """Chart: Overall performance across all game modes - stacked bar showing wins vs losses/draws"""
+    if df.empty:
+        return "<p>No games found.</p>"
+    
+    df_copy = df.copy()
+    df_copy['DateOnly'] = df_copy['Date'].dt.date
+    df_copy['DateOnly'] = pd.to_datetime(df_copy['DateOnly'])
+    
+    # Calculate daily totals
+    daily_stats = df_copy.groupby('DateOnly').agg({
+        'Status': lambda x: [(x == 'Win').sum(), (x != 'Win').sum()]
+    }).reset_index()
+    
+    # Expand the Status column into separate columns
+    daily_stats['Wins'] = daily_stats['Status'].apply(lambda x: x[0])
+    daily_stats['NonWins'] = daily_stats['Status'].apply(lambda x: x[1])
+    daily_stats['TotalGames'] = daily_stats['Wins'] + daily_stats['NonWins']
+    daily_stats['WinPct'] = (daily_stats['Wins'] / daily_stats['TotalGames'] * 100).round(1)
+    
+    # Create stacked bar chart
+    fig = go.Figure()
+    
+    # Add wins bar (green)
+    fig.add_trace(go.Bar(
+        x=daily_stats['DateOnly'],
+        y=daily_stats['Wins'],
+        name='Wins',
+        marker_color='#76b900',
+        hovertemplate='<b>%{x}</b><br>Wins: %{y}<extra></extra>'
+    ))
+    
+    # Add losses/draws bar (red)
+    fig.add_trace(go.Bar(
+        x=daily_stats['DateOnly'],
+        y=daily_stats['NonWins'],
+        name='Losses/Draws',
+        marker_color='#ca3431',
+        hovertemplate='<b>%{x}</b><br>Losses/Draws: %{y}<extra></extra>'
+    ))
+    
+    # Update layout for stacked bars
+    fig.update_layout(
+        title=f'Overall Performance - All Game Modes (Since {START_DATE})',
+        template='plotly_dark',
+        xaxis=dict(title='Date'),
+        yaxis=dict(title='Games Played'),
+        barmode='stack',
+        hovermode='x unified',
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='right',
+            x=1
+        ),
+        height=450
+    )
+    
+    return fig.to_html(full_html=False, include_plotlyjs='cdn')
+
 def create_daily_games_chart(df, is_960=False):
     """Chart: Total games played by day"""
     # Filter for 960 or standard games
@@ -368,6 +429,52 @@ def create_weekly_stats_table(df, is_960=False):
     
     return fig.to_html(full_html=False, include_plotlyjs='cdn')
 
+def create_rating_boxplot(df, is_960=False):
+    """Chart: Box and whisker plot showing rating distribution by game type"""
+    # Filter for 960 or standard games
+    filtered_df = df[df['Is960'] == is_960].copy()
+    
+    if filtered_df.empty:
+        return "<p>No games found for this variant.</p>"
+    
+    # Color map for consistency
+    color_map = {
+        'Rapid': '#76b900', 'Blitz': '#F0C800', 
+        'Bullet': '#ca3431', 'Daily': '#00BFFF',
+        'Rapid960': '#76b900', 'Blitz960': '#F0C800',
+        'Bullet960': '#ca3431', 'Daily960': '#00BFFF'
+    }
+    
+    title = f'Rating Distribution by Game Type - Chess 960 (Since {START_DATE})' if is_960 else f'Rating Distribution by Game Type - Standard Chess (Since {START_DATE})'
+    
+    fig = go.Figure()
+    
+    # Get unique modes and sort them
+    mode_list = ['Rapid960', 'Blitz960', 'Bullet960', 'Daily960'] if is_960 else ['Rapid', 'Blitz', 'Bullet', 'Daily']
+    
+    for mode in mode_list:
+        mode_data = filtered_df[filtered_df['Mode'] == mode]
+        if len(mode_data) > 0:
+            display_name = mode.replace('960', ' 960') if is_960 else mode
+            fig.add_trace(go.Box(
+                y=mode_data['Rating'],
+                name=display_name,
+                marker_color=color_map.get(mode, '#888888'),
+                boxmean='sd'  # Shows mean and standard deviation
+            ))
+    
+    fig.update_layout(
+        title=title,
+        template='plotly_dark',
+        yaxis_title='Rating',
+        xaxis_title='Game Type',
+        showlegend=False,
+        height=400
+    )
+    
+    return fig.to_html(full_html=False, include_plotlyjs='cdn')
+
+
 # --- FLASK APP ---
 app = Flask(__name__)
 
@@ -465,6 +572,11 @@ HTML_TEMPLATE = """
         <h1>♟️ Chess.com Performance Dashboard</h1>
         <div class="subtitle">{{ username }} | Since {{ start_date }}</div>
         
+        <div class="chart-container">
+            <h2>📊 Overall Performance - All Game Modes</h2>
+            {{ chart_overall|safe }}
+        </div>
+        
         <div class="section-header">♔ Standard Chess</div>
         
         <div class="stats">
@@ -486,6 +598,11 @@ HTML_TEMPLATE = """
         <div class="chart-container">
             <h2>📊 Total Games Played by Day</h2>
             {{ chart0_standard|safe }}
+        </div>
+        
+        <div class="chart-container">
+            <h2>📦 Rating Distribution by Game Type</h2>
+            {{ chart4_standard|safe }}
         </div>
         
         <div class="chart-container">
@@ -524,6 +641,11 @@ HTML_TEMPLATE = """
         <div class="chart-container">
             <h2>📊 Total Games Played by Day</h2>
             {{ chart0_960|safe }}
+        </div>
+        
+        <div class="chart-container">
+            <h2>📦 Rating Distribution by Game Type</h2>
+            {{ chart4_960|safe }}
         </div>
         
         <div class="chart-container">
@@ -581,17 +703,22 @@ def dashboard():
     # Generate game count stats
     game_counts = df['Mode'].value_counts().to_dict()
     
+    # Generate overall performance chart (all modes combined)
+    chart_overall = create_overall_performance_chart(df)
+    
     # Generate charts for standard chess
     chart0_standard = create_daily_games_chart(df, is_960=False)
     chart1_standard = create_daily_average_chart(df, is_960=False)
     chart2_standard = create_interval_table(df, is_960=False)
     chart3_standard = create_weekly_stats_table(df, is_960=False)
+    chart4_standard = create_rating_boxplot(df, is_960=False)
     
     # Generate charts for Chess 960
     chart0_960 = create_daily_games_chart(df, is_960=True)
     chart1_960 = create_daily_average_chart(df, is_960=True)
     chart2_960 = create_interval_table(df, is_960=True)
     chart3_960 = create_weekly_stats_table(df, is_960=True)
+    chart4_960 = create_rating_boxplot(df, is_960=True)
     
     return render_template_string(
         HTML_TEMPLATE,
@@ -600,14 +727,17 @@ def dashboard():
         game_counts=game_counts,
         current_ratings=current_ratings,
         interval=GAME_INTERVAL,
+        chart_overall=chart_overall,
         chart0_standard=chart0_standard,
         chart1_standard=chart1_standard,
         chart2_standard=chart2_standard,
         chart3_standard=chart3_standard,
+        chart4_standard=chart4_standard,
         chart0_960=chart0_960,
         chart1_960=chart1_960,
         chart2_960=chart2_960,
-        chart3_960=chart3_960
+        chart3_960=chart3_960,
+        chart4_960=chart4_960
     )
 
 def open_browser():
